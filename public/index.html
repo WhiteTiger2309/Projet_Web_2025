@@ -1,0 +1,578 @@
+<!DOCTYPE html>
+<html lang="fr">
+<meta charset="utf-8" />
+<title>Audio Sampler</title>
+  <!-- CSS modularisé pour plus de clarté/maintenabilité -->
+  <link rel="stylesheet" href="css/theme.css">
+  <link rel="stylesheet" href="css/buttons.css">
+  <link rel="stylesheet" href="css/panel.css">
+  <link rel="stylesheet" href="css/pads.css">
+  <link rel="stylesheet" href="css/waveform.css">
+  <link rel="stylesheet" href="css/utilities.css">
+
+<h1>Audio Sampler</h1>
+
+<div class="row" style="margin-top:6px">
+  <select id="presetSelect"><option>(chargement…)</option></select>
+  <span id="presetStatus" style="color:#9ca3af"></span>
+  </div>
+
+<!-- ============================ 1) CORE ============================ -->
+<script>
+class SamplerEngine {
+  constructor(samplesInput, opts = {}) {
+    this.ORDER = [12,13,14,15, 8,9,10,11, 4,5,6,7, 0,1,2,3]; // bas→haut, gauche→droite
+    this.GRID_SIZE = 16;
+    this.slots = new Array(this.GRID_SIZE).fill(null);
+    for (let k = 0; k < Math.min(samplesInput.length, this.GRID_SIZE); k++) {
+      this.slots[this.ORDER[k]] = samplesInput[k];
+    }
+    this.state = this.slots.map(() => ({ buffer:null, loading:false, bytesTotal:0, bytesRecv:0 }));
+    this.onStatus   = opts.onStatus   || (()=>{});
+    this.onProgress = opts.onProgress || (()=>{});
+    this.onReady    = opts.onReady    || (()=>{});
+    this.onPlay     = opts.onPlay     || (()=>{});
+    this.onError    = opts.onError    || (()=>{});
+    this.audioCtx = opts.audioContext || null;
+    // Contrôle avancé
+    this.controllers = new Array(this.GRID_SIZE).fill(null); // AbortController par slot
+    this.playing     = new Array(this.GRID_SIZE).fill(null); // BufferSource en cours par slot
+    this.master      = null;                                  // Gain master
+    this.gains       = new Array(this.GRID_SIZE).fill(null); // Gain par slot (créé à la demande)
+  }
+  async ensureAudioContext(){
+    if(!this.audioCtx) this.audioCtx=new (window.AudioContext||window.webkitAudioContext)();
+    if(!this.master){
+      this.master = this.audioCtx.createGain();
+      this.master.gain.value = 1;
+    }
+    // Brancher l'analyser entre master et destination
+    if(!this.analyser){
+      this.analyser = this.audioCtx.createAnalyser();
+      this.analyser.fftSize = 1024;
+      // rechaîner proprement
+      try{ this.master.disconnect(); }catch{}
+      this.master.connect(this.analyser);
+      this.analyser.connect(this.audioCtx.destination);
+    }
+    if(this.audioCtx.state==="suspended") await this.audioCtx.resume();
+    return this.audioCtx;
+  }
+  async loadAllParallel(){ await this.ensureAudioContext(); const tasks=this.slots.map((s,i)=>s?this.loadAndDecode(i):Promise.resolve()); return Promise.allSettled(tasks); }
+  async loadAndDecode(i){
+    const s=this.slots[i], st=this.state[i]; if(!s||st.loading||st.buffer) return;
+    st.loading=true; this.onStatus(i,{phase:"connect",message:"Connexion…"});
+    try{
+      const controller = new AbortController();
+      this.controllers[i] = controller;
+      const res=await fetch(s.url, { signal: controller.signal }); if(!res.ok||!res.body) throw new Error(`HTTP ${res.status}`);
+      const total=Number(res.headers.get("content-length")||0)||null; st.bytesTotal=total||0;
+      const reader=res.body.getReader(); const chunks=[]; let recv=0;
+      while(true){ const {done,value}=await reader.read(); if(done)break; chunks.push(value); recv+=value.length; st.bytesRecv=recv; this.onStatus(i,{phase:"downloading",message:"Téléchargement…"}); this.onProgress(i,recv,total); }
+      const blob=new Blob(chunks,{type:res.headers.get("content-type")||"application/octet-stream"});
+      this.onStatus(i,{phase:"decoding",message:"Décodage…"});
+      const ctx=await this.ensureAudioContext(); const buf=await ctx.decodeAudioData(await blob.arrayBuffer());
+      st.buffer=buf; this.onStatus(i,{phase:"ready",message:`Prêt (${this.#niceBytes(blob.size)})`}); this.onProgress(i,total??recv,total??recv); this.onReady(i,buf.duration);
+    }catch(e){
+      if (e && (e.name === 'AbortError' || String(e).includes('abort'))) {
+        this.onStatus(i,{phase:"canceled",message:"Annulé"});
+      } else {
+        this.onError(i,e); this.onStatus(i,{phase:"error",message:String(e.message||e)});
+      }
+    } finally{ st.loading=false; this.controllers[i]=null; }
+  }
+  async play(i){
+    const st=this.state[i]; if(!st?.buffer) return false; const ctx=await this.ensureAudioContext();
+    // retrigger
+    this.stop(i);
+    const src=ctx.createBufferSource(); src.buffer=st.buffer; src.connect(this.#getOutputNode(i)); src.start(0); this.playing[i]=src; src.onended=()=>{ this.playing[i]=null; };
+    this.onPlay(i); return true;
+  }
+  stop(i){ try{ this.playing[i]?.stop(); }catch{} this.playing[i]=null; }
+  stopAll(){ for(let k=0;k<this.GRID_SIZE;k++) this.stop(k); }
+  cancel(i){ this.controllers[i]?.abort(); }
+  cancelAll(){ for(let k=0;k<this.GRID_SIZE;k++) this.cancel(k); }
+  setMasterGain(v){ if(this.master) this.master.gain.value = Math.max(0, Math.min(1, v)); }
+  setSlotGain(i,v){ const g=this.gains[i]; if(g) g.gain.value = Math.max(0, Math.min(1, v)); }
+  #getOutputNode(i){ if(!this.gains[i]){ const g=this.audioCtx.createGain(); g.gain.value=1; g.connect(this.master||this.audioCtx.destination); this.gains[i]=g; } return this.gains[i]; }
+  getAnalyser(){ return this.analyser || null; }
+  // Remplace dynamiquement la liste de samples (garde le même objet moteur)
+  replaceSamples(samplesInput){
+    this.slots = new Array(this.GRID_SIZE).fill(null);
+    for (let k = 0; k < Math.min(samplesInput.length, this.GRID_SIZE); k++) {
+      this.slots[this.ORDER[k]] = samplesInput[k];
+    }
+    this.state = this.slots.map(() => ({ buffer:null, loading:false, bytesTotal:0, bytesRecv:0 }));
+    // reset contrôleurs/lectures
+    this.controllers = new Array(this.GRID_SIZE).fill(null);
+    this.playing = new Array(this.GRID_SIZE).fill(null);
+  }
+  getSlots(){ return this.slots.slice(); }
+  getState(i){ return this.state[i]; }
+  #niceBytes(n){ if(!Number.isFinite(n))return ""; const u=["B","KB","MB","GB"];let i=0,v=n;while(v>=1024&&i<u.length-1){v/=1024;i++;}return v.toFixed(v>=10||i===0?0:1)+" "+u[i]; }
+}
+window.SamplerEngine = SamplerEngine;
+</script>
+
+<!-- ============================ 2) GUI : pads + MIDI select ============================ -->
+<div class="app-layout" style="margin-top:6px">
+  <!-- Rangée 1: contrôles sur toute la largeur -->
+  <div class="app-controls">
+    <div class="row" style="margin-bottom:10px">
+      <button class="btn btn--primary" id="btnAll">Charger tout (GUI)</button>
+      <span id="globalStatus" style="color:#9ca3af"></span>
+      <button class="btn btn--danger" id="btnCancelAll" title="Annuler tous les téléchargements">Annuler tout</button>
+      <button class="btn" id="btnStopAll" title="Arrêter toutes les lectures">Stop tout</button>
+    </div>
+    <div class="row" style="margin-bottom:10px">
+      <button class="btn" id="midiEnableBtn">Activer MIDI (GUI)</button>
+      <label for="midiInput" style="color:#9ca3af">Entrée MIDI :</label>
+      <select id="midiInput" disabled><option>(aucune)</option></select>
+      <span id="midiStatus" style="color:#9ca3af"></span>
+    </div>
+  </div>
+
+  <!-- Rangée 2: pads à gauche -->
+  <div class="app-pads">
+    <div class="grid" id="grid"></div>
+  </div>
+
+  <!-- Rangée 2: waveform à droite -->
+  <div class="panel app-waveform">
+    <h2>Waveform (mix en temps réel)</h2>
+    <canvas id="wfCanvas"></canvas>
+  </div>
+</div>
+
+<!-- ============================ 3) HEADLESS : test sans GUI ============================ -->
+<div class="panel">
+  <h2>Test headless (sans GUI)</h2>
+  <p>Charge en parallèle, loggue la progression, et joue automatiquement le premier sample prêt.</p>
+  <div class="row">
+    <button class="btn" id="btnHeadless">Démarrer test headless</button>
+    <span id="headlessStatus" style="color:#9ca3af"></span>
+  </div>
+  <pre class="log" id="headlessLog"></pre>
+</div>
+
+<!-- ============================ 4) HEADLESS + MIDI : sans GUI pads ============================ -->
+<div class="panel">
+  <h2>Test headless + MIDI (sans pads)</h2>
+  <p>Charge <b>tous</b> les samples et les rend jouables via un <b>device MIDI</b> (mapping C2 → 16 notes).</p>
+  <div class="row">
+    <button class="btn" id="midiEnableBtnHL">Activer MIDI (headless)</button>
+    <label for="midiInputHL" style="color:#9ca3af">Entrée MIDI :</label>
+    <select id="midiInputHL" disabled><option>(aucune)</option></select>
+    <button class="btn" id="btnHeadlessMIDI" disabled>Démarrer headless + MIDI</button>
+    <span id="headlessMIDIStatus" style="color:#9ca3af"></span>
+  </div>
+  <pre class="log" id="headlessMIDILog"></pre>
+</div>
+
+<script>
+// ------- Samples (ordre logique) -------
+const SAMPLES_INPUT = [
+  { name: "Kick",  url: "https://upload.wikimedia.org/wikipedia/commons/a/a3/Hardstyle_kick.wav" },
+  { name: "Snare", url: "https://upload.wikimedia.org/wikipedia/commons/transcoded/c/c7/Redoblante_de_marcha.ogg/Redoblante_de_marcha.ogg.mp3?download=" },
+  { name: "HH-CL", url: "https://upload.wikimedia.org/wikipedia/commons/transcoded/c/c9/Hi-Hat_Cerrado.ogg/Hi-Hat_Cerrado.ogg.mp3?download=" },
+  { name: "HH-OP", url: "https://upload.wikimedia.org/wikipedia/commons/transcoded/0/07/Hi-Hat_Abierto.ogg/Hi-Hat_Abierto.ogg.mp3?download=" },
+  { name: "Tom-H", url: "https://upload.wikimedia.org/wikipedia/commons/transcoded/3/3c/Tom_Agudo.ogg/Tom_Agudo.ogg.mp3?download=" },
+  { name: "Tom-M", url: "https://upload.wikimedia.org/wikipedia/commons/transcoded/a/a4/Tom_Medio.ogg/Tom_Medio.ogg.mp3?download=" },
+  { name: "Tom-L", url: "https://upload.wikimedia.org/wikipedia/commons/transcoded/8/8d/Tom_Grave.ogg/Tom_Grave.ogg.mp3?download=" },
+  { name: "Crash", url: "https://upload.wikimedia.org/wikipedia/commons/transcoded/6/68/Crash.ogg/Crash.ogg.mp3?download=" },
+  { name: "Ride",  url: "https://upload.wikimedia.org/wikipedia/commons/transcoded/2/24/Ride.ogg/Ride.ogg.mp3?download=" },
+];
+
+// ======= GUI =======
+const grid = document.getElementById("grid");
+const btnAll = document.getElementById("btnAll");
+const globalStatus = document.getElementById("globalStatus");
+const btnCancelAll = document.getElementById("btnCancelAll");
+const btnStopAll = document.getElementById("btnStopAll");
+const presetSelect = document.getElementById("presetSelect");
+const presetStatus = document.getElementById("presetStatus");
+// Au chargement, pas de preset sélectionné => désactiver le bouton de chargement
+btnAll.disabled = true;
+
+// Démarrage sans sons: on attend que l'utilisateur choisisse un preset
+const guiEngine = new SamplerEngine([], {
+  onStatus: (i, {phase, message}) => {
+    const els = slotEls[i]; if (!els) return;
+    if (phase === "connect") { els.sub.textContent = "Connexion…"; els.bar.style.width = "0%"; }
+    else if (phase === "downloading") { /* progression détaillée via onProgress */ }
+    else if (phase === "decoding") { els.sub.textContent = "Décodage…"; }
+    else if (phase === "ready") { els.sub.textContent = message || "Prêt"; els.pad.classList.add("ready"); els.pad.disabled = false; }
+    else if (phase === "canceled") { els.sub.textContent = "Annulé"; els.bar.style.width = "0%"; }
+    else if (phase === "error") { els.sub.textContent = "Erreur: " + (message || ""); }
+  },
+  onProgress: (i, recvd, total) => {
+    const els = slotEls[i]; if (!els) return;
+    if (total && total > 0) {
+      const pct = Math.max(0, Math.min(100, Math.floor(recvd/total*100)));
+      els.bar.style.width = pct + "%";
+      els.sub.textContent = `${niceBytes(recvd)} / ${niceBytes(total)} (${pct}%)`;
+    } else {
+      const pct = Math.min(95, Math.floor(Math.log10((recvd||0)+10)*25));
+      els.bar.style.width = pct + "%";
+      els.sub.textContent = `${niceBytes(recvd)} reçus…`;
+    }
+  },
+  onPlay: (i) => {
+    const els = slotEls[i]; if (!els) return;
+    els.pad.classList.add("playing");
+    setTimeout(()=>els.pad.classList.remove("playing"), 150);
+  }
+});
+
+let slotEls = [];
+function buildGrid(){
+  grid.innerHTML = "";
+  const slots = guiEngine.getSlots();
+  slotEls = Array.from({length: slots.length});
+  slots.forEach((sample, i) => {
+    const pad = document.createElement("button");
+    pad.type = "button";
+    pad.className = "pad" + (sample ? "" : " empty");
+    pad.disabled = !sample;
+
+    const label = document.createElement("div");
+    label.className = "label";
+    label.textContent = sample ? (sample.name || "Samp") : "—";
+    pad.appendChild(label);
+
+    const sub = document.createElement("div");
+    sub.className = "sub";
+    sub.textContent = sample ? "En attente" : "";
+    pad.appendChild(sub);
+
+    if (sample) {
+      const prog = document.createElement("div"); prog.className = "prog";
+      const bar  = document.createElement("div"); bar.className = "bar";
+      prog.appendChild(bar); pad.appendChild(prog);
+      pad.addEventListener("click", () => { guiEngine.play(i); });
+      slotEls[i] = { pad, sub, bar };
+    }
+
+    grid.appendChild(pad);
+  });
+}
+buildGrid();
+
+btnAll.addEventListener("click", async () => {
+  btnAll.disabled = true;
+  globalStatus.textContent = "Chargement…";
+  await guiEngine.loadAllParallel();
+  globalStatus.textContent = "OK";
+  setTimeout(()=>globalStatus.textContent="", 1200);
+  btnAll.disabled = false;
+});
+
+btnCancelAll.addEventListener("click", () => {
+  guiEngine.cancelAll();
+  globalStatus.textContent = "Téléchargements annulés";
+  setTimeout(()=>globalStatus.textContent="", 1200);
+});
+
+btnStopAll.addEventListener("click", () => {
+  guiEngine.stopAll();
+  globalStatus.textContent = "Lectures stoppées";
+  setTimeout(()=>globalStatus.textContent="", 1200);
+});
+
+function niceBytes(n){ if(!Number.isFinite(n))return ""; const u=["B","KB","MB","GB"];let i=0,v=n;while(v>=1024&&i<u.length-1){v/=1024;i++;}return v.toFixed(v>=10||i===0?0:1)+" "+u[i]; }
+
+// ======= MIDI SELECT (GUI) =======
+const midiEnableBtn = document.getElementById("midiEnableBtn");
+const midiInputSel  = document.getElementById("midiInput");
+const midiStatus    = document.getElementById("midiStatus");
+let midiAccessGUI = null, currentInputGUI = null;
+const BASE_NOTE = 36; // C2
+const ORDER = [12,13,14,15, 8,9,10,11, 4,5,6,7, 0,1,2,3];
+
+midiEnableBtn.addEventListener("click", async () => {
+  if (!navigator.requestMIDIAccess) { midiStatus.textContent = "Web MIDI non supporté."; return; }
+  try {
+    midiAccessGUI = await navigator.requestMIDIAccess();
+    midiStatus.textContent = "MIDI activé.";
+    populateInputsGUI();
+    midiInputSel.disabled = false;
+    midiAccessGUI.onstatechange = populateInputsGUI;
+  } catch { midiStatus.textContent = "Accès MIDI refusé."; }
+});
+
+function populateInputsGUI() {
+  const selectedId = midiInputSel.value;
+  midiInputSel.innerHTML = "";
+  midiAccessGUI.inputs.forEach(input => {
+    const opt = document.createElement("option");
+    opt.value = input.id; opt.textContent = input.name || input.id;
+    midiInputSel.appendChild(opt);
+  });
+  if (!midiInputSel.options.length) {
+    midiInputSel.innerHTML = "<option>(aucune entrée)</option>";
+    midiInputSel.disabled = true;
+    return;
+  }
+  const toSelect = Array.from(midiInputSel.options).find(o => o.value === selectedId) || midiInputSel.options[0];
+  toSelect.selected = true;
+  bindSelectedInputGUI();
+}
+midiInputSel.addEventListener("change", bindSelectedInputGUI);
+
+function bindSelectedInputGUI() {
+  if (!midiAccessGUI) return;
+  if (currentInputGUI) currentInputGUI.onmidimessage = null;
+  const id = midiInputSel.value;
+  const input = Array.from(midiAccessGUI.inputs.values()).find(i => i.id === id);
+  if (!input) { midiStatus.textContent = "Entrée MIDI introuvable."; return; }
+  input.onmidimessage = (ev) => {
+    const [status, note, velocity] = ev.data, cmd = status & 0xf0;
+    if (cmd === 0x90 && velocity > 0) {
+      const off = note - BASE_NOTE; if (off < 0 || off > 15) return;
+      guiEngine.play(ORDER[off]);
+    }
+  };
+  currentInputGUI = input;
+  midiStatus.textContent = `Entrée: ${input.name || input.id} — mapping C2→pads (GUI)`;
+}
+
+// ======= HEADLESS (sans GUI) =======
+const btnHeadless = document.getElementById("btnHeadless");
+const headlessStatus = document.getElementById("headlessStatus");
+const headlessLog = document.getElementById("headlessLog");
+
+btnHeadless.addEventListener("click", async () => {
+  btnHeadless.disabled = true;
+  headlessStatus.textContent = "Chargement headless…";
+  headlessLog.textContent = "";
+
+  const headless = new SamplerEngine(SAMPLES_INPUT, {
+    audioContext: guiEngine.audioCtx || null,
+    onStatus: (i, {phase, message}) => log(`[Pad ${i}] ${phase}: ${message||""}`),
+    onProgress: (i, r, t) => log(`[Pad ${i}] ${r}${t?"/"+t:""} octets`),
+    onReady: (i, dur) => {
+      log(`[Pad ${i}] READY, duration=${dur.toFixed(3)}s`);
+      if (!headless._playedOnce) { headless._playedOnce = true; headless.play(i); log(`[Pad ${i}] PLAY (headless)`); }
+    },
+    onError: (i, err) => log(`[Pad ${i}] ERROR: ${err.message||err}`)
+  });
+
+  await headless.loadAllParallel();
+  headlessStatus.textContent = "Terminé (headless)";
+  setTimeout(()=> headlessStatus.textContent = "", 1500);
+  btnHeadless.disabled = false;
+
+  function log(s){ headlessLog.textContent += s + "\n"; headlessLog.scrollTop = headlessLog.scrollHeight; }
+});
+
+// ======= HEADLESS + MIDI (sans pads) =======
+const midiEnableBtnHL   = document.getElementById("midiEnableBtnHL");
+const midiInputSelHL    = document.getElementById("midiInputHL");
+const btnHeadlessMIDI   = document.getElementById("btnHeadlessMIDI");
+const headlessMIDIStatus= document.getElementById("headlessMIDIStatus");
+const headlessMIDILog   = document.getElementById("headlessMIDILog");
+let midiAccessHL = null, currentInputHL = null;
+
+midiEnableBtnHL.addEventListener("click", async () => {
+  if (!navigator.requestMIDIAccess) { headlessMIDIStatus.textContent = "Web MIDI non supporté."; return; }
+  try {
+    midiAccessHL = await navigator.requestMIDIAccess();
+    headlessMIDIStatus.textContent = "MIDI activé.";
+    populateInputsHL();
+    midiInputSelHL.disabled = false;
+    btnHeadlessMIDI.disabled = false; // autoriser le démarrage headless+MIDI
+    midiAccessHL.onstatechange = populateInputsHL;
+  } catch { headlessMIDIStatus.textContent = "Accès MIDI refusé."; }
+});
+
+function populateInputsHL() {
+  const selectedId = midiInputSelHL.value;
+  midiInputSelHL.innerHTML = "";
+  midiAccessHL.inputs.forEach(input => {
+    const opt = document.createElement("option");
+    opt.value = input.id; opt.textContent = input.name || input.id;
+    midiInputSelHL.appendChild(opt);
+  });
+  if (!midiInputSelHL.options.length) {
+    midiInputSelHL.innerHTML = "<option>(aucune entrée)</option>";
+    midiInputSelHL.disabled = true;
+    btnHeadlessMIDI.disabled = true;
+    return;
+  }
+  const toSelect = Array.from(midiInputSelHL.options).find(o => o.value === selectedId) || midiInputSelHL.options[0];
+  toSelect.selected = true;
+}
+
+btnHeadlessMIDI.addEventListener("click", async () => {
+  btnHeadlessMIDI.disabled = true;
+  headlessMIDIStatus.textContent = "Chargement headless + MIDI…";
+  headlessMIDILog.textContent = "";
+
+  // Crée un moteur headless, charge TOUT, puis connecte l'entrée MIDI sélectionnée.
+  const engineHL = new SamplerEngine(SAMPLES_INPUT, {
+    audioContext: guiEngine.audioCtx || null,
+    onStatus: (i, {phase, message}) => logHL(`[Pad ${i}] ${phase}: ${message||""}`),
+    onProgress: (i, r, t) => logHL(`[Pad ${i}] ${r}${t?"/"+t:""} octets`),
+    onReady: (i, dur) => logHL(`[Pad ${i}] READY, duration=${dur.toFixed(3)}s`),
+    onError: (i, err) => logHL(`[Pad ${i}] ERROR: ${err.message||err}`)
+  });
+
+  await engineHL.loadAllParallel(); // => tous les samples chargés et utilisables
+  headlessMIDIStatus.textContent = "Prêt — jouez via votre clavier MIDI (C2→pads)";
+
+  // Binder uniquement l’entrée choisie
+  const id = midiInputSelHL.value;
+  const input = midiAccessHL && Array.from(midiAccessHL.inputs.values()).find(i => i.id === id);
+  if (!input) {
+    headlessMIDIStatus.textContent = "Entrée MIDI introuvable.";
+    btnHeadlessMIDI.disabled = false;
+    return;
+  }
+  // Nettoyage ancien binding si relance
+  if (currentInputHL) currentInputHL.onmidimessage = null;
+
+  input.onmidimessage = (ev) => {
+    const [status, note, velocity] = ev.data, cmd = status & 0xf0;
+    if (cmd === 0x90 && velocity > 0) {
+      const off = note - BASE_NOTE; if (off < 0 || off > 15) return;
+      engineHL.play(ORDER[off]);
+    }
+  };
+  currentInputHL = input;
+  headlessMIDIStatus.textContent = `Prêt — MIDI: ${input.name || input.id} (C2→pads)`;
+  btnHeadlessMIDI.disabled = false;
+
+  function logHL(s){ headlessMIDILog.textContent += s + "\n"; headlessMIDILog.scrollTop = headlessMIDILog.scrollHeight; }
+});
+
+// ======= PRESETS SERVEUR (Seance5) =======
+(function connectServerPresets(){
+  const API = "http://localhost:3000/api/presets";
+  const BASE = "http://localhost:3000/presets";
+  let cache = [];
+
+  async function loadPresets(){
+    try{
+      const r = await fetch(API);
+      cache = await r.json();
+      presetSelect.innerHTML = "";
+      if(!Array.isArray(cache) || cache.length===0){
+        presetSelect.innerHTML = '<option>(aucun preset)</option>';
+        presetStatus.textContent = "Serveur ok, mais aucun preset";
+        return;
+      }
+      // Placeholder par défaut (aucun preset choisi)
+      const ph = document.createElement('option');
+      ph.value = ""; ph.textContent = "Choisir un style de sons…";
+      ph.selected = true; ph.disabled = true; ph.hidden = false;
+      presetSelect.appendChild(ph);
+
+      cache.forEach((p,idx)=>{
+        const opt = document.createElement('option');
+        opt.value = String(idx);
+        opt.textContent = p.name || `Preset ${idx+1}`;
+        presetSelect.appendChild(opt);
+      });
+      // Ne rien appliquer par défaut: la grille reste vide tant qu'aucun preset n'est choisi
+    }catch(e){
+      presetStatus.textContent = `Erreur serveur: ${e.message||e}`;
+    }
+  }
+
+  function toSamples(preset){
+    return preset.samples.map(s=>({
+      name: s.name || (s.url.split('/').pop().replace(/\.[^/.]+$/,'')),
+      url: encodeURI(`${BASE}/${s.url}`)
+    }));
+  }
+
+  function applyPreset(idx){
+    if (!Number.isFinite(idx) || !cache[idx]) return;
+    const samples = toSamples(cache[idx]);
+    guiEngine.replaceSamples(samples);
+    buildGrid();
+  }
+
+  presetSelect.addEventListener('change', ()=>{
+    const val = presetSelect.value;
+    if (val === ""){
+      guiEngine.replaceSamples([]);
+      buildGrid();
+      btnAll.disabled = true;
+      return;
+    }
+    const idx = parseInt(val,10);
+    if (Number.isNaN(idx)) return;
+    applyPreset(idx);
+    btnAll.disabled = false;
+  });
+
+  loadPresets();
+})();
+
+// ======= WAVEFORM (temps réel via AnalyserNode) =======
+(function setupWaveform(){
+  const canvas = document.getElementById('wfCanvas');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  let width = 0, height = 0, dpr = window.devicePixelRatio || 1;
+  let analyser = null, bufferLen = 0, data = null;
+
+  // Couleurs issues du thème CSS (variables)
+  const css = getComputedStyle(document.documentElement);
+  const waveStroke = (css.getPropertyValue('--wave-stroke') || '#7dd3fc').trim();
+  const waveGlow   = (css.getPropertyValue('--wave-glow')   || 'rgba(125,211,252,.45)').trim();
+
+  function resize(){
+    dpr = window.devicePixelRatio || 1;
+    const cssW = Math.floor(canvas.clientWidth);
+    const cssH = Math.max(100, Math.floor(canvas.clientHeight));
+    canvas.width = Math.floor(cssW * dpr);
+    canvas.height = Math.floor(cssH * dpr);
+    width = canvas.width; height = canvas.height;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  new ResizeObserver(resize).observe(canvas);
+  resize();
+
+  async function ensureAnalyser(){
+    // Assure l'AudioContext et l'analyser du moteur
+    await guiEngine.ensureAudioContext();
+    analyser = guiEngine.getAnalyser();
+    if (analyser){ bufferLen = analyser.frequencyBinCount; data = new Uint8Array(bufferLen); }
+  }
+
+  function draw(){
+    requestAnimationFrame(draw);
+    if (!analyser){ return; }
+    if (!data || data.length !== analyser.frequencyBinCount){
+      bufferLen = analyser.frequencyBinCount; data = new Uint8Array(bufferLen);
+    }
+  // Ne pas peindre en noir: on conserve l'arrière-plan CSS du canvas
+  ctx.clearRect(0, 0, canvas.clientWidth, canvas.clientHeight);
+
+  analyser.getByteTimeDomainData(data);
+  // Tracé avec contraste renforcé
+  ctx.lineWidth = 2.4;
+  ctx.strokeStyle = waveStroke;
+  ctx.shadowColor = waveGlow;
+  ctx.shadowBlur = 8;
+    ctx.beginPath();
+    const slice = canvas.clientWidth / data.length;
+    let x = 0;
+    for (let i = 0; i < data.length; i++){
+      const v = data[i] / 255; // 0..1
+      const y = v * canvas.clientHeight;
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      x += slice;
+    }
+  ctx.stroke();
+  // Reset shadow pour éviter d'affecter d'autres dessins
+  ctx.shadowBlur = 0;
+  ctx.shadowColor = 'transparent';
+  }
+
+  ensureAnalyser().then(draw);
+})();
+</script>
+</html>

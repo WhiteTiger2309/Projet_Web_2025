@@ -1,0 +1,3 @@
+/* Accessibilité + préférences */
+.btn:focus-visible,.pad:focus-visible{outline:2px solid var(--accent-2);outline-offset:2px}
+@media (prefers-reduced-motion:reduce){ *{animation:none!important;transition:none!important} }

@@ -1,0 +1,16 @@
+{
+  "name": "audio-sampler-server",
+  "version": "1.0.0",
+  "description": "Serveur HTTP pour AudioSampler (statics + /api/presets)",
+  "license": "ISC",
+  "type": "module",
+  "main": "index.mjs",
+  "scripts": {
+    "start": "node index.mjs",
+    "dev": "node --watch index.mjs"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^5.1.0"
+  }
+}

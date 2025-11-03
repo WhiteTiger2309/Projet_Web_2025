@@ -1,0 +1,80 @@
+:root{
+  /* Marque/couleurs principales (alignées sur les boutons) */
+  --brand-1:#1e3a8a; /* bleu profond (haut du dégradé) */
+  --brand-2:#1f2937; /* gris/bleu ardoise (bas du dégradé) */
+
+  /* Composants/pads */
+  --pad-size:120px; --pad-radius:16px; --pad-bg:#1f2937;
+  --pad-ready:#2563eb; --pad-playing:#f59e0b; --pad-disabled:#111827;
+  --pad-text:#e5e7eb; --muted:#9ca3af; --accent:#10b981;
+
+  /* Palette étendue */
+  --bg-0:#0f172a; /* fond sombre bleuté */
+  --bg-1:#0b1224;
+  --border:#1f2937; --text:#e5e7eb;
+  --accent-2:#22d3ee; --danger:#ef4444; --warning:#f59e0b;
+
+  /* Waveform (couleurs de tracé) */
+  --wave-stroke:#7dd3fc; /* bleu clair lisible sur fond sombre */
+  --wave-glow:rgba(125,211,252,.45); /* halo pour détacher la courbe */
+}
+
+/* Fond + typo + container */
+body{
+  font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+  /* Fond accordé aux boutons primaires (dégradé bleu → ardoise) */
+  background:radial-gradient(
+    1200px 900px at 20% 0%,
+    color-mix(in oklab, var(--brand-1) 88%, black) 0%,
+    color-mix(in oklab, var(--brand-1) 35%, var(--bg-0)) 38%,
+    var(--brand-2) 100%
+  ) fixed;
+  color:var(--text); padding:20px; line-height:1.45;
+}
+body > *:not(script):not(style){ max-width:1100px; margin-left:auto; margin-right:auto; }
+
+/* Titres/texte */
+h1{font-size:20px;margin:8px 0 12px;}
+h2{font-size:16px;margin:18px 0 8px;color:var(--text)}
+p{color:var(--muted);margin:4px 0 12px;}
+
+/* Utilitaires généraux */
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+select{
+  padding:8px 12px;
+  border-radius:10px;
+  border:1px solid color-mix(in oklab, var(--brand-1) 55%, var(--border));
+  background:linear-gradient(180deg,
+    color-mix(in oklab, var(--brand-1) 24%, #0f131a) 0%,
+    color-mix(in oklab, var(--brand-2) 85%, #0f131a) 100%
+  );
+  color:var(--text);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.03), 0 6px 18px rgba(0,0,0,.25);
+}
+/* Amélioration de la lisibilité des options (support dépend du navigateur/OS) */
+select option{
+  background-color: var(--bg-0);
+  color: var(--text);
+}
+select option:hover,
+select option:focus,
+select option:checked{
+  background-color: color-mix(in oklab, var(--brand-1) 45%, var(--bg-0));
+  color: #ffffff;
+}
+select option:disabled{ color: var(--muted); }
+select:hover{
+  background:linear-gradient(180deg,
+    color-mix(in oklab, var(--brand-1) 32%, #0f131a) 0%,
+    color-mix(in oklab, var(--brand-2) 90%, #0f131a) 100%
+  );
+}
+select:focus-visible{
+  outline:2px solid var(--accent-2);
+  outline-offset:2px;
+  border-color:var(--brand-1);
+}
+
+/* Media queries globales (taille des pads) */
+@media (max-width:560px){ :root{ --pad-size:96px } }
+@media (max-width:440px){ :root{ --pad-size:84px } }

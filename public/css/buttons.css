@@ -1,0 +1,9 @@
+/* Boutons */
+.btn{border:1px solid var(--border);padding:10px 12px;border-radius:10px;background:#111827;color:var(--text);cursor:pointer;transition:transform .08s ease,background .2s ease,box-shadow .2s ease}
+.btn:hover{background:#172033;transform:translateY(-1px)}
+.btn:active{transform:translateY(0)}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.btn--primary{background:linear-gradient(180deg,var(--brand-1),var(--brand-2));border-color:var(--brand-1)}
+.btn--primary:hover{background:linear-gradient(180deg,#1f4bb3,#223047)}
+.btn--danger{background:linear-gradient(180deg,#7f1d1d,#1f2937);border-color:#7f1d1d}
+.btn--danger:hover{background:linear-gradient(180deg,#9a2424,#2a3242)}
