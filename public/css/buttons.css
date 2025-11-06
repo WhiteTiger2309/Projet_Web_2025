@@ -1,5 +1,5 @@
 /* Boutons */
-.btn{border:1px solid var(--border);padding:10px 12px;border-radius:10px;background:#111827;color:var(--text);cursor:pointer;transition:transform .08s ease,background .2s ease,box-shadow .2s ease}
+.btn{border:1px solid var(--border);padding:10px 12px;border-radius:10px;background:#111827;color:var(--text);cursor:pointer;transition:transform .08s ease,background .2s ease,box-shadow .2s ease;font-family:var(--btn-font);font-weight:600;letter-spacing:.2px;-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
 .btn:hover{background:#172033;transform:translateY(-1px)}
 .btn:active{transform:translateY(0)}
 .btn:disabled{opacity:.5;cursor:not-allowed}

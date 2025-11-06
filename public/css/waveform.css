@@ -13,3 +13,10 @@
 	);
 	box-shadow:inset 0 1px 0 rgba(255,255,255,.03);
 }
+
+/* EQ controls under the waveform */
+.eq-controls{ margin-top:12px; display:grid; grid-template-columns: 90px 1fr 56px; gap:8px 10px; align-items:center; }
+.eq-controls .title{ grid-column: 1 / -1; color:var(--muted); font-weight:600; margin-bottom:4px; }
+.eq-controls label{ color:#cbd5e1; font-size:12px; text-align:right; }
+.eq-controls output{ color:#9ca3af; font-variant-numeric: tabular-nums; font-size:12px; text-align:right; }
+.eq-controls input[type="range"]{ width:100%; accent-color: var(--wave-stroke); }

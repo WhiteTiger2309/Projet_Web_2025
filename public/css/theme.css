@@ -1,4 +1,11 @@
 :root{
+  /* Typographies */
+  --btn-font: 'Inter', system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+}
+
+/* Optionnel: chargement léger de la police Inter (500/600) */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@500;600&display=swap');
+:root{
   /* Marque/couleurs principales (alignées sur les boutons) */
   --brand-1:#1e3a8a; /* bleu profond (haut du dégradé) */
   --brand-2:#1f2937; /* gris/bleu ardoise (bas du dégradé) */

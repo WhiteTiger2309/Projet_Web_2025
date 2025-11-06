@@ -39,6 +39,9 @@ class SamplerEngine {
     this.playing     = new Array(this.GRID_SIZE).fill(null); // BufferSource en cours par slot
     this.master      = null;                                  // Gain master
     this.gains       = new Array(this.GRID_SIZE).fill(null); // Gain par slot (créé à la demande)
+    // Traitements globaux
+    this.eqBands     = null;                                  // Tableau de BiquadFilterNode (peaking)
+    this.panner      = null;                                  // StereoPannerNode
   }
   async ensureAudioContext(){
     if(!this.audioCtx) this.audioCtx=new (window.AudioContext||window.webkitAudioContext)();
@@ -46,15 +49,29 @@ class SamplerEngine {
       this.master = this.audioCtx.createGain();
       this.master.gain.value = 1;
     }
-    // Brancher l'analyser entre master et destination
-    if(!this.analyser){
-      this.analyser = this.audioCtx.createAnalyser();
-      this.analyser.fftSize = 1024;
-      // rechaîner proprement
+    // Préparer EQ (6 bandes peaking) + panner + analyser et chaînage
+    const rebuildChain = () => {
       try{ this.master.disconnect(); }catch{}
-      this.master.connect(this.analyser);
+      if (this.eqBands && this.eqBands.length){
+        // Connecter en série
+        this.master.connect(this.eqBands[0]);
+        for (let i=0;i<this.eqBands.length-1;i++) this.eqBands[i].connect(this.eqBands[i+1]);
+        (this.eqBands[this.eqBands.length-1] || this.master).connect(this.panner);
+      } else {
+        this.master.connect(this.panner);
+      }
+      this.panner.connect(this.analyser);
       this.analyser.connect(this.audioCtx.destination);
+    };
+
+    if(!this.eqBands){
+      const freqs = [60,170,350,1000,3500,10000];
+      this.eqBands = freqs.map(f=>{ const b=this.audioCtx.createBiquadFilter(); b.type='peaking'; b.frequency.value=f; b.Q.value=1; b.gain.value=0; return b; });
     }
+    if(!this.panner){ this.panner = this.audioCtx.createStereoPanner(); }
+    if(!this.analyser){ this.analyser = this.audioCtx.createAnalyser(); this.analyser.fftSize = 1024; }
+    // (Re)chaîner à chaque appel pour garantir la topologie
+    rebuildChain();
     if(this.audioCtx.state==="suspended") await this.audioCtx.resume();
     return this.audioCtx;
   }
@@ -72,7 +89,10 @@ class SamplerEngine {
       const blob=new Blob(chunks,{type:res.headers.get("content-type")||"application/octet-stream"});
       this.onStatus(i,{phase:"decoding",message:"Décodage…"});
       const ctx=await this.ensureAudioContext(); const buf=await ctx.decodeAudioData(await blob.arrayBuffer());
-      st.buffer=buf; this.onStatus(i,{phase:"ready",message:`Prêt (${this.#niceBytes(blob.size)})`}); this.onProgress(i,total??recv,total??recv); this.onReady(i,buf.duration);
+  st.buffer=buf;
+  // Signale simplement "Prêt" sans réinjecter de progression (évite d'afficher la taille/100%)
+  this.onStatus(i,{phase:"ready",message:"Prêt"});
+  this.onReady(i,buf.duration);
     }catch(e){
       if (e && (e.name === 'AbortError' || String(e).includes('abort'))) {
         this.onStatus(i,{phase:"canceled",message:"Annulé"});
@@ -94,6 +114,8 @@ class SamplerEngine {
   cancelAll(){ for(let k=0;k<this.GRID_SIZE;k++) this.cancel(k); }
   setMasterGain(v){ if(this.master) this.master.gain.value = Math.max(0, Math.min(1, v)); }
   setSlotGain(i,v){ const g=this.gains[i]; if(g) g.gain.value = Math.max(0, Math.min(1, v)); }
+  setEqGain(i, db){ if(this.eqBands && this.eqBands[i]) this.eqBands[i].gain.value = db; }
+  setPan(v){ if(this.panner) this.panner.pan.value = Math.max(-1, Math.min(1, v)); }
   #getOutputNode(i){ if(!this.gains[i]){ const g=this.audioCtx.createGain(); g.gain.value=1; g.connect(this.master||this.audioCtx.destination); this.gains[i]=g; } return this.gains[i]; }
   getAnalyser(){ return this.analyser || null; }
   // Remplace dynamiquement la liste de samples (garde le même objet moteur)
@@ -124,12 +146,14 @@ window.SamplerEngine = SamplerEngine;
       <button class="btn btn--danger" id="btnCancelAll" title="Annuler tous les téléchargements">Annuler tout</button>
       <button class="btn" id="btnStopAll" title="Arrêter toutes les lectures">Stop tout</button>
     </div>
+    <!--
     <div class="row" style="margin-bottom:10px">
       <button class="btn" id="midiEnableBtn">Activer MIDI (GUI)</button>
       <label for="midiInput" style="color:#9ca3af">Entrée MIDI :</label>
       <select id="midiInput" disabled><option>(aucune)</option></select>
       <span id="midiStatus" style="color:#9ca3af"></span>
     </div>
+    -->
   </div>
 
   <!-- Rangée 2: pads à gauche -->
@@ -138,13 +162,14 @@ window.SamplerEngine = SamplerEngine;
   </div>
 
   <!-- Rangée 2: waveform à droite -->
-  <div class="panel app-waveform">
+  <div class="panel app-waveform is-hidden">
     <h2>Waveform (mix en temps réel)</h2>
     <canvas id="wfCanvas"></canvas>
+    <div class="eq-controls" id="eqControls"></div>
   </div>
 </div>
 
-<!-- ============================ 3) HEADLESS : test sans GUI ============================ -->
+<!-- ============================ 3) HEADLESS : désactivé ============================
 <div class="panel">
   <h2>Test headless (sans GUI)</h2>
   <p>Charge en parallèle, loggue la progression, et joue automatiquement le premier sample prêt.</p>
@@ -154,8 +179,9 @@ window.SamplerEngine = SamplerEngine;
   </div>
   <pre class="log" id="headlessLog"></pre>
 </div>
+-->
 
-<!-- ============================ 4) HEADLESS + MIDI : sans GUI pads ============================ -->
+<!-- ============================ 4) HEADLESS + MIDI : désactivé ============================
 <div class="panel">
   <h2>Test headless + MIDI (sans pads)</h2>
   <p>Charge <b>tous</b> les samples et les rend jouables via un <b>device MIDI</b> (mapping C2 → 16 notes).</p>
@@ -168,6 +194,7 @@ window.SamplerEngine = SamplerEngine;
   </div>
   <pre class="log" id="headlessMIDILog"></pre>
 </div>
+-->
 
 <script>
 // ------- Samples (ordre logique) -------
@@ -191,17 +218,25 @@ const btnCancelAll = document.getElementById("btnCancelAll");
 const btnStopAll = document.getElementById("btnStopAll");
 const presetSelect = document.getElementById("presetSelect");
 const presetStatus = document.getElementById("presetStatus");
+const waveformPanel = document.querySelector('.app-waveform');
 // Au chargement, pas de preset sélectionné => désactiver le bouton de chargement
 btnAll.disabled = true;
 
 // Démarrage sans sons: on attend que l'utilisateur choisisse un preset
+let expectedSlots = 0, readyCount = 0;
+function prepareForLoad(){
+  expectedSlots = guiEngine.getSlots().filter(Boolean).length;
+  readyCount = 0;
+  if (waveformPanel) waveformPanel.classList.add('is-hidden');
+}
+
 const guiEngine = new SamplerEngine([], {
   onStatus: (i, {phase, message}) => {
     const els = slotEls[i]; if (!els) return;
     if (phase === "connect") { els.sub.textContent = "Connexion…"; els.bar.style.width = "0%"; }
     else if (phase === "downloading") { /* progression détaillée via onProgress */ }
-    else if (phase === "decoding") { els.sub.textContent = "Décodage…"; }
-    else if (phase === "ready") { els.sub.textContent = message || "Prêt"; els.pad.classList.add("ready"); els.pad.disabled = false; }
+  else if (phase === "decoding") { els.sub.textContent = "Décodage…"; }
+  else if (phase === "ready") { els.sub.textContent = message || "Prêt"; if(els.bar) els.bar.style.width = "100%"; els.pad.classList.add("ready"); els.pad.disabled = false; }
     else if (phase === "canceled") { els.sub.textContent = "Annulé"; els.bar.style.width = "0%"; }
     else if (phase === "error") { els.sub.textContent = "Erreur: " + (message || ""); }
   },
@@ -217,6 +252,13 @@ const guiEngine = new SamplerEngine([], {
       els.sub.textContent = `${niceBytes(recvd)} reçus…`;
     }
   },
+  onReady: () => {
+    // Dès que tous les samples du preset sont prêts, on affiche la waveform + EQ
+    readyCount = Math.min(expectedSlots, readyCount + 1);
+    if (expectedSlots > 0 && readyCount === expectedSlots){
+      if (waveformPanel) waveformPanel.classList.remove('is-hidden');
+    }
+  },
   onPlay: (i) => {
     const els = slotEls[i]; if (!els) return;
     els.pad.classList.add("playing");
@@ -225,6 +267,11 @@ const guiEngine = new SamplerEngine([], {
 });
 
 let slotEls = [];
+// Utilitaire: première lettre en majuscule (le reste inchangé)
+function capitalizeFirst(txt){
+  if (!txt || typeof txt !== 'string') return txt;
+  return txt.charAt(0).toUpperCase() + txt.slice(1);
+}
 function buildGrid(){
   grid.innerHTML = "";
   const slots = guiEngine.getSlots();
@@ -235,9 +282,9 @@ function buildGrid(){
     pad.className = "pad" + (sample ? "" : " empty");
     pad.disabled = !sample;
 
-    const label = document.createElement("div");
+  const label = document.createElement("div");
     label.className = "label";
-    label.textContent = sample ? (sample.name || "Samp") : "—";
+  label.textContent = sample ? capitalizeFirst(sample.name || "Samp") : "—";
     pad.appendChild(label);
 
     const sub = document.createElement("div");
@@ -261,6 +308,7 @@ buildGrid();
 btnAll.addEventListener("click", async () => {
   btnAll.disabled = true;
   globalStatus.textContent = "Chargement…";
+  prepareForLoad();
   await guiEngine.loadAllParallel();
   globalStatus.textContent = "OK";
   setTimeout(()=>globalStatus.textContent="", 1200);
@@ -281,7 +329,7 @@ btnStopAll.addEventListener("click", () => {
 
 function niceBytes(n){ if(!Number.isFinite(n))return ""; const u=["B","KB","MB","GB"];let i=0,v=n;while(v>=1024&&i<u.length-1){v/=1024;i++;}return v.toFixed(v>=10||i===0?0:1)+" "+u[i]; }
 
-// ======= MIDI SELECT (GUI) =======
+/* ======= MIDI SELECT (GUI) — désactivé =======
 const midiEnableBtn = document.getElementById("midiEnableBtn");
 const midiInputSel  = document.getElementById("midiInput");
 const midiStatus    = document.getElementById("midiStatus");
@@ -289,161 +337,19 @@ let midiAccessGUI = null, currentInputGUI = null;
 const BASE_NOTE = 36; // C2
 const ORDER = [12,13,14,15, 8,9,10,11, 4,5,6,7, 0,1,2,3];
 
-midiEnableBtn.addEventListener("click", async () => {
-  if (!navigator.requestMIDIAccess) { midiStatus.textContent = "Web MIDI non supporté."; return; }
-  try {
-    midiAccessGUI = await navigator.requestMIDIAccess();
-    midiStatus.textContent = "MIDI activé.";
-    populateInputsGUI();
-    midiInputSel.disabled = false;
-    midiAccessGUI.onstatechange = populateInputsGUI;
-  } catch { midiStatus.textContent = "Accès MIDI refusé."; }
-});
-
-function populateInputsGUI() {
-  const selectedId = midiInputSel.value;
-  midiInputSel.innerHTML = "";
-  midiAccessGUI.inputs.forEach(input => {
-    const opt = document.createElement("option");
-    opt.value = input.id; opt.textContent = input.name || input.id;
-    midiInputSel.appendChild(opt);
-  });
-  if (!midiInputSel.options.length) {
-    midiInputSel.innerHTML = "<option>(aucune entrée)</option>";
-    midiInputSel.disabled = true;
-    return;
-  }
-  const toSelect = Array.from(midiInputSel.options).find(o => o.value === selectedId) || midiInputSel.options[0];
-  toSelect.selected = true;
-  bindSelectedInputGUI();
-}
+midiEnableBtn.addEventListener("click", async () => { ... });
+function populateInputsGUI() { ... }
 midiInputSel.addEventListener("change", bindSelectedInputGUI);
+function bindSelectedInputGUI() { ... }
+*/
 
-function bindSelectedInputGUI() {
-  if (!midiAccessGUI) return;
-  if (currentInputGUI) currentInputGUI.onmidimessage = null;
-  const id = midiInputSel.value;
-  const input = Array.from(midiAccessGUI.inputs.values()).find(i => i.id === id);
-  if (!input) { midiStatus.textContent = "Entrée MIDI introuvable."; return; }
-  input.onmidimessage = (ev) => {
-    const [status, note, velocity] = ev.data, cmd = status & 0xf0;
-    if (cmd === 0x90 && velocity > 0) {
-      const off = note - BASE_NOTE; if (off < 0 || off > 15) return;
-      guiEngine.play(ORDER[off]);
-    }
-  };
-  currentInputGUI = input;
-  midiStatus.textContent = `Entrée: ${input.name || input.id} — mapping C2→pads (GUI)`;
-}
+/* ======= HEADLESS (sans GUI) — désactivé =======
+... tests headless commentés ...
+*/
 
-// ======= HEADLESS (sans GUI) =======
-const btnHeadless = document.getElementById("btnHeadless");
-const headlessStatus = document.getElementById("headlessStatus");
-const headlessLog = document.getElementById("headlessLog");
-
-btnHeadless.addEventListener("click", async () => {
-  btnHeadless.disabled = true;
-  headlessStatus.textContent = "Chargement headless…";
-  headlessLog.textContent = "";
-
-  const headless = new SamplerEngine(SAMPLES_INPUT, {
-    audioContext: guiEngine.audioCtx || null,
-    onStatus: (i, {phase, message}) => log(`[Pad ${i}] ${phase}: ${message||""}`),
-    onProgress: (i, r, t) => log(`[Pad ${i}] ${r}${t?"/"+t:""} octets`),
-    onReady: (i, dur) => {
-      log(`[Pad ${i}] READY, duration=${dur.toFixed(3)}s`);
-      if (!headless._playedOnce) { headless._playedOnce = true; headless.play(i); log(`[Pad ${i}] PLAY (headless)`); }
-    },
-    onError: (i, err) => log(`[Pad ${i}] ERROR: ${err.message||err}`)
-  });
-
-  await headless.loadAllParallel();
-  headlessStatus.textContent = "Terminé (headless)";
-  setTimeout(()=> headlessStatus.textContent = "", 1500);
-  btnHeadless.disabled = false;
-
-  function log(s){ headlessLog.textContent += s + "\n"; headlessLog.scrollTop = headlessLog.scrollHeight; }
-});
-
-// ======= HEADLESS + MIDI (sans pads) =======
-const midiEnableBtnHL   = document.getElementById("midiEnableBtnHL");
-const midiInputSelHL    = document.getElementById("midiInputHL");
-const btnHeadlessMIDI   = document.getElementById("btnHeadlessMIDI");
-const headlessMIDIStatus= document.getElementById("headlessMIDIStatus");
-const headlessMIDILog   = document.getElementById("headlessMIDILog");
-let midiAccessHL = null, currentInputHL = null;
-
-midiEnableBtnHL.addEventListener("click", async () => {
-  if (!navigator.requestMIDIAccess) { headlessMIDIStatus.textContent = "Web MIDI non supporté."; return; }
-  try {
-    midiAccessHL = await navigator.requestMIDIAccess();
-    headlessMIDIStatus.textContent = "MIDI activé.";
-    populateInputsHL();
-    midiInputSelHL.disabled = false;
-    btnHeadlessMIDI.disabled = false; // autoriser le démarrage headless+MIDI
-    midiAccessHL.onstatechange = populateInputsHL;
-  } catch { headlessMIDIStatus.textContent = "Accès MIDI refusé."; }
-});
-
-function populateInputsHL() {
-  const selectedId = midiInputSelHL.value;
-  midiInputSelHL.innerHTML = "";
-  midiAccessHL.inputs.forEach(input => {
-    const opt = document.createElement("option");
-    opt.value = input.id; opt.textContent = input.name || input.id;
-    midiInputSelHL.appendChild(opt);
-  });
-  if (!midiInputSelHL.options.length) {
-    midiInputSelHL.innerHTML = "<option>(aucune entrée)</option>";
-    midiInputSelHL.disabled = true;
-    btnHeadlessMIDI.disabled = true;
-    return;
-  }
-  const toSelect = Array.from(midiInputSelHL.options).find(o => o.value === selectedId) || midiInputSelHL.options[0];
-  toSelect.selected = true;
-}
-
-btnHeadlessMIDI.addEventListener("click", async () => {
-  btnHeadlessMIDI.disabled = true;
-  headlessMIDIStatus.textContent = "Chargement headless + MIDI…";
-  headlessMIDILog.textContent = "";
-
-  // Crée un moteur headless, charge TOUT, puis connecte l'entrée MIDI sélectionnée.
-  const engineHL = new SamplerEngine(SAMPLES_INPUT, {
-    audioContext: guiEngine.audioCtx || null,
-    onStatus: (i, {phase, message}) => logHL(`[Pad ${i}] ${phase}: ${message||""}`),
-    onProgress: (i, r, t) => logHL(`[Pad ${i}] ${r}${t?"/"+t:""} octets`),
-    onReady: (i, dur) => logHL(`[Pad ${i}] READY, duration=${dur.toFixed(3)}s`),
-    onError: (i, err) => logHL(`[Pad ${i}] ERROR: ${err.message||err}`)
-  });
-
-  await engineHL.loadAllParallel(); // => tous les samples chargés et utilisables
-  headlessMIDIStatus.textContent = "Prêt — jouez via votre clavier MIDI (C2→pads)";
-
-  // Binder uniquement l’entrée choisie
-  const id = midiInputSelHL.value;
-  const input = midiAccessHL && Array.from(midiAccessHL.inputs.values()).find(i => i.id === id);
-  if (!input) {
-    headlessMIDIStatus.textContent = "Entrée MIDI introuvable.";
-    btnHeadlessMIDI.disabled = false;
-    return;
-  }
-  // Nettoyage ancien binding si relance
-  if (currentInputHL) currentInputHL.onmidimessage = null;
-
-  input.onmidimessage = (ev) => {
-    const [status, note, velocity] = ev.data, cmd = status & 0xf0;
-    if (cmd === 0x90 && velocity > 0) {
-      const off = note - BASE_NOTE; if (off < 0 || off > 15) return;
-      engineHL.play(ORDER[off]);
-    }
-  };
-  currentInputHL = input;
-  headlessMIDIStatus.textContent = `Prêt — MIDI: ${input.name || input.id} (C2→pads)`;
-  btnHeadlessMIDI.disabled = false;
-
-  function logHL(s){ headlessMIDILog.textContent += s + "\n"; headlessMIDILog.scrollTop = headlessMIDILog.scrollHeight; }
-});
+/* ======= HEADLESS + MIDI (sans pads) — désactivé =======
+... tests headless+MIDI commentés ...
+*/
 
 // ======= PRESETS SERVEUR (Seance5) =======
 (function connectServerPresets(){
@@ -480,10 +386,13 @@ btnHeadlessMIDI.addEventListener("click", async () => {
   }
 
   function toSamples(preset){
-    return preset.samples.map(s=>({
-      name: s.name || (s.url.split('/').pop().replace(/\.[^/.]+$/,'')),
-      url: encodeURI(`${BASE}/${s.url}`)
-    }));
+    return preset.samples.map(s=>{
+      const rawName = s.name || (s.url.split('/').pop().replace(/\.[^/.]+$/,''));
+      return {
+        name: capitalizeFirst(rawName),
+        url: encodeURI(`${BASE}/${s.url}`)
+      };
+    });
   }
 
   function applyPreset(idx){
@@ -491,6 +400,8 @@ btnHeadlessMIDI.addEventListener("click", async () => {
     const samples = toSamples(cache[idx]);
     guiEngine.replaceSamples(samples);
     buildGrid();
+    // Cacher la waveform en attendant le chargement
+    prepareForLoad();
   }
 
   presetSelect.addEventListener('change', ()=>{
@@ -499,6 +410,7 @@ btnHeadlessMIDI.addEventListener("click", async () => {
       guiEngine.replaceSamples([]);
       buildGrid();
       btnAll.disabled = true;
+      if (waveformPanel) waveformPanel.classList.add('is-hidden');
       return;
     }
     const idx = parseInt(val,10);
@@ -573,6 +485,41 @@ btnHeadlessMIDI.addEventListener("click", async () => {
   }
 
   ensureAnalyser().then(draw);
+})();
+
+// ======= EQ + Balance + Volume (UI sous la waveform) =======
+(function setupEQ(){
+  const container = document.getElementById('eqControls');
+  if (!container) return;
+  const freqs = [60,170,350,1000,3500,10000];
+
+  // Titre
+  const title = document.createElement('div'); title.className='title'; title.textContent='Égaliseur, volume et balance'; container.appendChild(title);
+
+  // Rendu des bandes EQ
+  const makeRow = (labelText, inputEl, outEl)=>{
+    const lab=document.createElement('label'); lab.textContent=labelText; container.appendChild(lab);
+    container.appendChild(inputEl); container.appendChild(outEl);
+  };
+
+  freqs.forEach((f, i)=>{
+    const input=document.createElement('input'); input.type='range'; input.min='-30'; input.max='30'; input.step='1'; input.value='0';
+    const out=document.createElement('output'); out.id=`eqOut${i}`; out.textContent='0 dB';
+    input.addEventListener('input', async (e)=>{ const v=parseFloat(e.target.value||'0'); await guiEngine.ensureAudioContext(); guiEngine.setEqGain(i, v); out.textContent = v + ' dB'; });
+    makeRow(`${f}Hz`, input, out);
+  });
+
+  // Volume (0..10) -> master 0..1
+  const vol=document.createElement('input'); vol.type='range'; vol.min='0'; vol.max='10'; vol.step='0.1'; vol.value='10';
+  const volOut=document.createElement('output'); volOut.id='volumeOut'; volOut.textContent='10';
+  vol.addEventListener('input', async (e)=>{ const v=parseFloat(e.target.value||'0'); await guiEngine.ensureAudioContext(); guiEngine.setMasterGain(v/10); volOut.textContent = v.toFixed(1).replace(/\.0$/, ''); });
+  makeRow('Volume', vol, volOut);
+
+  // Balance (-1..1)
+  const pan=document.createElement('input'); pan.type='range'; pan.min='-1'; pan.max='1'; pan.step='0.1'; pan.value='0';
+  const panOut=document.createElement('output'); panOut.id='panOut'; panOut.textContent='0';
+  pan.addEventListener('input', async (e)=>{ const v=parseFloat(e.target.value||'0'); await guiEngine.ensureAudioContext(); guiEngine.setPan(v); panOut.textContent = v.toFixed(1).replace(/\.0$/, ''); });
+  makeRow('Balance', pan, panOut);
 })();
 </script>
 </html>
