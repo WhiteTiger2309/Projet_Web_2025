@@ -1,7 +1,7 @@
 /* Grille + Pads */
 .grid{display:grid;grid-template-columns:repeat(4,var(--pad-size));gap:10px;align-items:center}
 .pad{width:var(--pad-size);height:var(--pad-size);border-radius:var(--pad-radius);border:1px solid var(--border);background:linear-gradient(180deg,#0f172a 0%,var(--pad-bg) 100%);color:var(--pad-text);display:flex;flex-direction:column;justify-content:space-between;position:relative;overflow:hidden;box-shadow:inset 0 1px 0 rgba(255,255,255,.03),0 8px 30px rgba(0,0,0,.35)}
-.pad.ready{outline:2px solid rgba(37,99,235,.45)}
+.pad.ready{outline:2px solid rgba(4, 61, 82, 0.918)}
 .pad.playing{outline:2px solid rgba(245,158,11,.5);box-shadow:0 0 0 2px rgba(245,158,11,.25),inset 0 1px 0 rgba(255,255,255,.06),0 8px 35px rgba(0,0,0,.45)}
 .pad.disabled{opacity:.55;filter:grayscale(.3)}
 .label{font-size:14px;padding:8px 10px;color:var(--muted)}

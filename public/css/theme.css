@@ -8,7 +8,7 @@
 :root{
   /* Marque/couleurs principales (alignées sur les boutons) */
   --brand-1:#1e3a8a; /* bleu profond (haut du dégradé) */
-  --brand-2:#1f2937; /* gris/bleu ardoise (bas du dégradé) */
+  --brand-2:#334155; /* gris/bleu ardoise (bas du dégradé) — légèrement plus clair */
 
   /* Composants/pads */
   --pad-size:120px; --pad-radius:16px; --pad-bg:#1f2937;
@@ -32,8 +32,8 @@ body{
   /* Fond accordé aux boutons primaires (dégradé bleu → ardoise) */
   background:radial-gradient(
     1200px 900px at 20% 0%,
-    color-mix(in oklab, var(--brand-1) 88%, black) 0%,
-    color-mix(in oklab, var(--brand-1) 35%, var(--bg-0)) 38%,
+    color-mix(in oklab, var(--brand-1) 96%, black) 0%, /* un peu plus clair en haut */
+    color-mix(in oklab, var(--brand-1) 55%, var(--bg-0)) 38%, /* éclaircissement de la zone médiane */
     var(--brand-2) 100%
   ) fixed;
   color:var(--text); padding:20px; line-height:1.45;
